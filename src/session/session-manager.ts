@@ -69,6 +69,8 @@ interface AssembledPrompt {
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
   private readonly evictor: IdleEvictor;
+  /** 由 bootstrap 注入：会话创建后在 record.agent.ctx 上注册通道专属工具。 */
+  agentToolInstaller?: (record: SessionRecord) => void;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
   private readonly agents: DshAgentRegistry;
@@ -102,6 +104,7 @@ export class SessionManager {
         // 回收会话时统一清理其待答问题/待批审批，避免 pending 悬挂泄漏
         this.questionChannel?.cancelPending(key);
         this.approvalChannel?.cancelPending(key);
+        this.disposeAgentTools(record);
       },
     );
 
@@ -535,6 +538,11 @@ export class SessionManager {
     };
 
     this.sessions.set(key, record);
+    try {
+      this.agentToolInstaller?.(record);
+    } catch (err) {
+      this.logger.warn(`agent tool install failed: key=${key} err=${err instanceof Error ? err.message : String(err)}`);
+    }
     return record;
   }
 
@@ -561,6 +569,7 @@ export class SessionManager {
     this.sessions.delete(key);
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
+    this.disposeAgentTools(record);
     this.logger.info(`session removed: key=${key}`);
   }
 
@@ -621,7 +630,20 @@ export class SessionManager {
       record.agent.cancel({ kind: 'user' });
     }
     await Promise.allSettled(records.map((r) => r.handle.dispose()));
+    for (const record of records) this.disposeAgentTools(record);
     this.logger.info(`all sessions disposed (count=${records.length})`);
+  }
+
+  /** 释放注册在 agent 作用域上的工具，避免会话回收后残留。 */
+  private disposeAgentTools(record: SessionRecord): void {
+    for (const dispose of record.toolDisposers ?? []) {
+      try {
+        dispose();
+      } catch {
+        // 释放失败不影响回收流程
+      }
+    }
+    record.toolDisposers = [];
   }
 
   get size(): number {

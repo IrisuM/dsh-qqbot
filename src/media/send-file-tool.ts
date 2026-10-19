@@ -9,7 +9,6 @@
 import { existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
-import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig, SendFileConfig } from '../config.ts';
 import type { DshAgent, SessionManager } from '../session/index.ts';
@@ -38,30 +37,14 @@ export interface MediaSenderLike {
   sendFile(target: ReplyTarget, source: { localPath?: string }, opts?: { fileName?: string }): Promise<MediaSendResult>;
 }
 
-/** tools 服务最小接口 */
-interface ToolsRegistryLike {
-  register(definition: unknown): unknown;
-}
-
 /** qqbot_send_file 的合法参数 */
 interface SendFileArgs {
   file_path: string;
-  target?: string;
 }
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr']);
-
-/** 解析显式 target（"c2c:openid" / "group:openid"），非法返回 undefined */
-function parseTarget(input: string): ReplyTarget | undefined {
-  const idx = input.indexOf(':');
-  if (idx <= 0) return undefined;
-  const scope = input.slice(0, idx);
-  const targetId = input.slice(idx + 1);
-  if (!targetId || (scope !== 'c2c' && scope !== 'group')) return undefined;
-  return { scope, targetId };
-}
 
 /** 判断 filePath 是否位于 root 目录内（含 root 本身） */
 function isWithinRoot(filePath: string, root: string): boolean {
@@ -76,23 +59,24 @@ function isPathAllowed(filePath: string, config: SendFileConfig, cwd: string): b
   return roots.some((root) => isWithinRoot(filePath, root));
 }
 
-/** 注册 qqbot_send_file 工具（tools 服务缺失时优雅降级，不阻断插件启动） */
-export function registerSendFileTool(
-  ctx: Context,
+/**
+ * 构造 qqbot_send_file 的工具定义。
+ *
+ * 不在这里注册：工具的可见性按会话隔离——bootstrap 会在每条 QQ 会话创建时，
+ * 通过 record.agent.ctx.tools.register() 只挂到那条会话的 agent 作用域上，
+ * 其它会话（例如 Web 新建的会话）看不到这个工具。
+ *
+ * 发送目标同样不收模型参数：只认当前 agent 对应的 QQ 会话，避免跨会话推送。
+ */
+export function createSendFileDefinition(
   bot: MediaSenderLike,
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
-): void {
-  const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
-  if (!tools?.register) {
-    logger.warn('im-qqbot: tools 服务不可用，qqbot_send_file 工具未注册');
-    return;
-  }
-
+): unknown {
   const cwd = config.cwd || process.cwd();
 
-  const definition = {
+  return {
     name: SEND_FILE_TOOL_NAME,
     description: DESCRIPTION,
     parameters: {
@@ -101,10 +85,6 @@ export function registerSendFileTool(
         file_path: {
           type: 'string',
           description: 'Absolute path to the local file to send (image/video/voice/generic file).',
-        },
-        target: {
-          type: 'string',
-          description: 'Optional send target as "c2c:openid" or "group:openid". Omit to send to the current conversation.',
         },
       },
       required: ['file_path'],
@@ -129,23 +109,17 @@ export function registerSendFileTool(
       },
     },
     async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
-      const { file_path, target } = args as SendFileArgs;
+      const { file_path } = args as SendFileArgs;
       if (typeof file_path !== 'string' || file_path.length === 0) {
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
       }
 
-      // 1. 解析发送目标：显式 target > 当前会话（exec.agent → SessionRecord）
-      let replyTarget: ReplyTarget | undefined;
-      if (target !== undefined && target !== '') {
-        replyTarget = parseTarget(target);
-        if (replyTarget === undefined) {
-          throw new Error(`qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid，收到: ${target}`);
-        }
-      } else if (exec.agent !== undefined) {
-        replyTarget = manager.findByAgent(exec.agent as DshAgent)?.replyTarget;
-      }
+      // 1. 发送目标只来自当前 agent 的 QQ 会话记录
+      const replyTarget: ReplyTarget | undefined = exec.agent !== undefined
+        ? manager.findByAgent(exec.agent as DshAgent)?.replyTarget
+        : undefined;
       if (replyTarget === undefined) {
-        throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
+        throw new Error('qqbot_send_file: 当前会话没有绑定 QQ 通道，无法发送');
       }
 
       // 2. 校验文件 + 路径白名单
@@ -188,7 +162,4 @@ export function registerSendFileTool(
       };
     },
   };
-
-  tools.register(definition);
-  logger.info('im-qqbot: qqbot_send_file 工具已注册');
 }

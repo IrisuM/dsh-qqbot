@@ -134,6 +134,8 @@ export interface SessionRecord {
   senderId: string;
   lastActivity: number;
   agentPreset?: string;
+  /** 注册在 record.agent.ctx 上的工具 disposer，会话回收时释放。 */
+  toolDisposers?: Array<() => void>;
 }
 
 /** 会话状态信息（/status 用） */

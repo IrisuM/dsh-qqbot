@@ -23,7 +23,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { createSendFileDefinition, type MediaSenderLike } from '../media/send-file-tool.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -166,7 +166,16 @@ export async function bootstrapGateway(
     sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
     sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
   };
-  registerSendFileTool(ctx, mediaSender, manager, config, logger);
+  // qqbot_send_file 只挂到每条 QQ 会话的 agent 作用域：其它会话（Web 等）看不到该工具
+  const sendFileDefinition = createSendFileDefinition(mediaSender, manager, config, logger);
+  manager.agentToolInstaller = (record) => {
+    const tools = record.agent.ctx?.get?.('tools') as { register?: (definition: unknown) => () => void } | undefined;
+    if (!tools?.register) {
+      logger.warn('im-qqbot: tools 服务不可用，qqbot_send_file 未注册');
+      return;
+    }
+    record.toolDisposers = [tools.register(sendFileDefinition)];
+  };
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
