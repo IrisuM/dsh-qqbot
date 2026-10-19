@@ -25,7 +25,8 @@ interface ApprovalSessionEvent {
 export interface ApprovalRequest {
   agent: {
     id: string;
-    session: { events: ApprovalSessionEvent[] };
+    /** 运行时的 Agent 才带 session；审批请求上下文里可能拿不到，用于回显命令。 */
+    session?: { events?: ApprovalSessionEvent[] };
   };
   toolName: string;
   /** 关联的 tool/call 事件 id，用于从 session log 找回被 gate 的命令 */
@@ -54,11 +55,10 @@ export interface ApprovalChannelSenderLike {
 
 /** approval/request waterfall 的 answerer handler */
 export interface ApprovalChannelContext {
-  get(name: string): unknown;
   on(
     event: string,
     handler: (...args: unknown[]) => unknown,
-    options?: { prepend?: boolean },
+    options?: { prepend?: boolean; global?: boolean },
   ): void;
 }
 
@@ -79,7 +79,10 @@ const COMMAND_CLIP = 500;
  */
 function commandOf(req: ApprovalRequest): string | undefined {
   if (req.callId === undefined) return undefined;
-  const events = req.agent.session.events;
+  // 审批请求可能来自没有 live session 的上下文（例如跨进程/投影后的 Agent），
+  // 此时只是拿不到命令原文，不能因此让整个审批失败。
+  const events = req.agent.session?.events;
+  if (!Array.isArray(events)) return undefined;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i];
     if (!event || event.type !== 'tool/call') continue;
@@ -118,20 +121,16 @@ export class ApprovalChannel {
   }
 
   /**
-   * 注册 approval/request waterfall answerer。approval 服务未挂载时优雅禁用。
+   * 注册 approval/request waterfall answerer。
+   *
+   * 不再探测 approval 服务是否已挂载：它是 optional peer，挂载时机可能晚于
+   * 本插件的 apply，一次性探测失败会让通道永久失效。监听事件本身不依赖服务
+   * 存在——服务就绪后请求自然经过同一条瀑布，未挂载时不会有请求到达。
+   *
+   * `global` 是必需的：approval/request 按 agent 作用域派发，根作用域注册的
+   * 监听器不带 global 会被作用域过滤掉。
    */
   public install(ctx: ApprovalChannelContext): void {
-    let hasApproval = false;
-    try {
-      hasApproval = ctx.get('approval') !== undefined;
-    } catch {
-      hasApproval = false;
-    }
-    if (!hasApproval) {
-      this.logger.debug('im-qqbot: approval service unavailable — approval channel disabled');
-      return;
-    }
-
     const self = this;
     ctx.on('approval/request', (req: unknown, next: unknown) => {
       const request = req as ApprovalRequest;
@@ -139,7 +138,7 @@ export class ApprovalChannel {
       const record = self.manager.findBySessionId(request.agent.id);
       if (record) return self.park(record, request);
       return nextFn();
-    }, { prepend: true });
+    }, { global: true, prepend: true });
     this.logger.info('im-qqbot: QQ approval channel installed');
   }
 
