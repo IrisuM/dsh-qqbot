@@ -7,6 +7,7 @@
  * 每个会话同一时间最多一个 pending 审批（审批是阻塞式的）；outcome 是 dsh
  * 协议的闭合集合，无 allow-always，只提供「允许一次 / 拒绝」两个按钮。
  */
+import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { decodeButtonData } from './button-utils.ts';
@@ -25,7 +26,11 @@ interface ApprovalSessionEvent {
 export interface ApprovalRequest {
   agent: {
     id: string;
-    /** 运行时的 Agent 才带 session；审批请求上下文里可能拿不到，用于回显命令。 */
+    /**
+     * dsh-agent 的 `Agent.session` 在类型上是必选，但审批请求可能来自跨进程或
+     * 投影后的上下文，运行时拿不到 live session（类型契约与运行时的 gap）。此时
+     * 只是无法回显命令原文，不应让整个审批失败，故这里标为可选。
+     */
     session?: { events?: ApprovalSessionEvent[] };
   };
   toolName: string;
@@ -58,8 +63,8 @@ export interface ApprovalChannelContext {
   on(
     event: string,
     handler: (...args: unknown[]) => unknown,
-    options?: { prepend?: boolean; global?: boolean },
-  ): void;
+    options?: EventOptions,
+  ): () => boolean;
 }
 
 // ── 每会话 pending 状态 ──

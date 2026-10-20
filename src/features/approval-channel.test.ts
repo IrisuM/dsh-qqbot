@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import {
   ApprovalChannel,
@@ -78,18 +79,19 @@ function makeEvent(data: string | undefined, peer: { user?: string; group?: stri
 /** 注册 approval/request 监听并捕获 handler，供测试手动触发 */
 function installAndCapture(ch: ApprovalChannel, sent: SentMessage[]): {
   handler: (req: unknown, next: unknown) => unknown;
-  options?: { prepend?: boolean; global?: boolean };
+  options?: EventOptions;
 } {
   const captured: {
     handler?: (req: unknown, next: unknown) => unknown;
-    options?: { prepend?: boolean; global?: boolean };
+    options?: EventOptions;
   } = {};
   const ctx: ApprovalChannelContext = {
-    on: vi.fn((event: string, handler: (req: unknown, next: unknown) => unknown, options?: { prepend?: boolean; global?: boolean }) => {
+    on: vi.fn((event: string, handler: (req: unknown, next: unknown) => unknown, options?: EventOptions) => {
       if (event === 'approval/request') {
         captured.handler = handler;
         captured.options = options;
       }
+      return () => true;
     }),
   };
   ch.install(ctx);
@@ -169,9 +171,7 @@ describe('ApprovalChannel.install', () => {
     ch.cancelPending(sessionKey('c2c', 'peer-qq'));
     await expect(p).resolves.toBe('cancelled');
   });
-});
 
-describe('ApprovalChannel.install', () => {
   it('registers a global waterfall listener without probing the approval service', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: () => undefined }),
